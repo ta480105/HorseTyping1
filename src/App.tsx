@@ -104,6 +104,26 @@ export default function App() {
     };
   }, []);
 
+  // After Google OAuth returns to the site, prompt new Google users to choose
+  // their public KeyCraft username. Existing profiles continue straight into the app.
+  useEffect(() => {
+    if (!supabase || !user || user.app_metadata?.provider !== 'google') return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (!cancelled && !data?.username) {
+        setIsAuthModalOpen(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
   const typing = useTypingTest({
     initialMode: 'timed',
     initialDuration: 60,
