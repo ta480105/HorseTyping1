@@ -1,0 +1,6 @@
+{
+  "name": "Keycraft — Minimal Typing Speed Test",
+  "description": "A minimal, precision typing speed test and practice platform with timed and full-paragraph modes, live WPM and accuracy telemetry, history analytics, and global leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
