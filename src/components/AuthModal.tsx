@@ -11,6 +11,7 @@ import {
   RefreshCw,
   ArrowLeft,
   AlertCircle,
+  Chrome,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 import {
@@ -54,6 +55,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [resendingOtp, setResendingOtp] = useState(false);
   const [resendCooldownSec, setResendCooldownSec] = useState(0);
+  const [googleNeedsUsername, setGoogleNeedsUsername] = useState(false);
 
   // Countdown timer for Resend OTP rate-limit protection
   useEffect(() => {
@@ -63,6 +65,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }, 1000);
     return () => window.clearInterval(timer);
   }, [resendCooldownSec]);
+
+  // Google OAuth users must choose a public KeyCraft username on their first login.
+  useEffect(() => {
+    let cancelled = false;
+    if (!isOpen || !user || user.app_metadata?.provider !== 'google' || !supabase) {
+      if (!user) setGoogleNeedsUsername(false);
+      return;
+    }
+
+    (async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (!cancelled) setGoogleNeedsUsername(!data?.username);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, user]);
 
   // Clear transient secrets (password & OTP) whenever the modal closes
   useEffect(() => {
@@ -366,6 +390,88 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    if (!supabase) {
+      setStatusMsg({
+        type: 'error',
+        text: 'Google login is not configured yet. Add the Supabase URL and public anon key, then enable Google in Supabase Auth.',
+      });
+      return;
+    }
+
+    setLoading(true);
+    setStatusMsg(null);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+      if (error) {
+        setStatusMsg({ type: 'error', text: error.message });
+        setLoading(false);
+      }
+    } catch (err) {
+      setStatusMsg({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not start Google sign-in.',
+      });
+      setLoading(false);
+    }
+  };
+
+  const handleSaveGoogleUsername = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = usernameInput.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+    if (cleaned.length < 2) {
+      setStatusMsg({
+        type: 'error',
+        text: 'Username must be 2–24 characters and may contain letters, numbers, underscores, or hyphens.',
+      });
+      return;
+    }
+    if (!supabase || !user) {
+      setStatusMsg({ type: 'error', text: 'Your Google session is not available. Please sign in again.' });
+      return;
+    }
+
+    setLoading(true);
+    setStatusMsg(null);
+    try {
+      const { error } = await supabase.from('profiles').upsert(
+        { id: user.id, username: cleaned },
+        { onConflict: 'id' }
+      );
+      if (error) {
+        setStatusMsg({
+          type: 'error',
+          text: error.code === '23505'
+            ? 'That username is already taken. Please choose another one.'
+            : `Could not save username: ${error.message}`,
+        });
+        return;
+      }
+
+      const { data: updatedData, error: metadataError } = await supabase.auth.updateUser({
+        data: { username: cleaned },
+      });
+      const updatedUser = !metadataError && updatedData.user ? updatedData.user : user;
+      onSetLocalUsername(cleaned);
+      onUserAuthenticated?.(updatedUser);
+      setGoogleNeedsUsername(false);
+      setStatusMsg({ type: 'success', text: `Your KeyCraft username "${cleaned}" has been saved.` });
+      window.setTimeout(onClose, 650);
+    } catch (err) {
+      setStatusMsg({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not save your KeyCraft username.',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSignOut = async () => {
     if (supabase) {
       await supabase.auth.signOut();
@@ -410,6 +516,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <h2 id="auth-modal-title" className="text-lg font-bold tracking-tight">
             {user
               ? 'Account Profile'
+              : googleNeedsUsername
+              ? 'Choose Your KeyCraft Username'
               : step === 'verify-signup-otp'
               ? 'Verify Your Email (6-Digit Code)'
               : 'Typist Profile & Authentication'}
@@ -469,8 +577,53 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </div>
         )}
 
-        {/* Signed-in Supabase User State */}
-        {user ? (
+        {/* Google users choose a public username once after their first successful sign-in. */}
+        {user && googleNeedsUsername ? (
+          <form onSubmit={handleSaveGoogleUsername} className="space-y-4" data-testid="google-username-form">
+            <div
+              className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+                isDark
+                  ? 'bg-[#161513] border-[#292824] text-[#b8b6ad]'
+                  : 'bg-[#f7f6f2] border-[#e2e0d8] text-[#45433d]'
+              }`}
+            >
+              <div className="font-semibold text-amber-500">Google account connected</div>
+              <p className="leading-relaxed">
+                Signed in as <strong>{user.email}</strong>. Choose a unique username for your KeyCraft profile and leaderboard. No KeyCraft password is needed.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="google-keycraft-username" className="block text-xs font-medium mb-1">
+                KeyCraft Username
+              </label>
+              <input
+                id="google-keycraft-username"
+                type="text"
+                required
+                minLength={2}
+                maxLength={24}
+                autoComplete="username"
+                value={usernameInput}
+                onChange={(e) => setUsernameInput(e.target.value)}
+                placeholder="e.g. swift_typist"
+                className={`w-full px-3.5 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                  isDark
+                    ? 'bg-[#141412] border-[#2c2b26] text-[#e6e4dd]'
+                    : 'bg-[#f7f6f2] border-[#d5d2c8] text-[#1c1b18]'
+                }`}
+              />
+              <p className="text-[11px] text-[#8c8a82] mt-1">2–24 characters. Letters, numbers, underscores, and hyphens only.</p>
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-amber-500 text-[#181816] font-semibold text-xs hover:bg-amber-400 transition-colors disabled:opacity-60"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>{loading ? 'Saving Username...' : 'Save Username & Continue'}</span>
+            </button>
+          </form>
+        ) : user ? (
           <div className="space-y-4">
             <div
               className={`p-4 rounded-xl border text-xs space-y-1.5 ${
@@ -631,6 +784,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </p>
               </div>
             )}
+
+            <button
+              type="button"
+              onClick={handleGoogleSignIn}
+              disabled={loading || !isSupabaseConfigured}
+              data-testid="google-signin-btn"
+              className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border text-xs font-semibold transition-colors disabled:opacity-60 ${
+                isDark
+                  ? 'border-[#33322c] bg-[#24231f] text-[#e6e4dd] hover:border-amber-500/50'
+                  : 'border-[#d5d2c8] bg-white text-[#1c1b18] hover:border-amber-600/50'
+              }`}
+            >
+              <Chrome className="w-4 h-4" />
+              <span>{loading ? 'Connecting to Google...' : 'Continue with Google'}</span>
+            </button>
+            <div className="flex items-center gap-3 text-[10px] text-[#8c8a82]">
+              <span className="h-px flex-1 bg-current opacity-20" />
+              <span>OR USE EMAIL</span>
+              <span className="h-px flex-1 bg-current opacity-20" />
+            </div>
 
             <form onSubmit={handleSupabaseAuth} className="space-y-4">
               <div
